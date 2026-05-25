@@ -15,24 +15,26 @@ env:
   TFSEC_VERSION: '1.28.1'
 
 jobs:
-  # ✅ JOB 1 — Plan Job
+  # ==========================================
+  # JOB 1 — Lint, Security Check & Plan
+  # ==========================================
   terraform-plan:
     name: 'Terraform Lint, Security Check & Plan'
     runs-on: ubuntu-latest
 
     steps:
       - name: 'Checkout GitHub repository'
-        uses: actions/checkout@v4                             # ✅ FIX: was @v2
+        uses: actions/checkout@v4                             
 
       - name: 'Configure AWS credentials'
-        uses: aws-actions/configure-aws-credentials@v4       # ✅ FIX: was @v1
+        uses: aws-actions/configure-aws-credentials@v4      
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: 'Set up Terraform'
-        uses: hashicorp/setup-terraform@v3                   # ✅ FIX: was @v1
+        uses: hashicorp/setup-terraform@v3                  
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
@@ -51,7 +53,7 @@ jobs:
         run: terraform init -no-color
 
       - name: 'Terraform Format Check'
-        run: terraform fmt -check -no-color        # ✅ FIX: was `terraform fmt` (silently reformatted, never committed)
+        run: terraform fmt -check -no-color        
 
       - name: 'Terraform Validate'
         run: terraform validate -no-color
@@ -64,22 +66,23 @@ jobs:
       - name: 'tfsec'
         run: tfsec . --no-color
 
-      # ✅ Save plan as binary AND capture human-readable output
+      # ✅ NEW: Download State to prevent local backend "amnesia"
+      - name: 'Download State from S3'
+        run: aws s3 cp s3://${{ secrets.TF_LOGS_BUCKET }}/state/terraform.tfstate terraform.tfstate || true
+
       - name: 'Terraform Plan'
         run: |
-          terraform plan -out=tfplan -no-color 2>&1 | tee plan_output.txt    # ✅ FIX: added -no-color
+          terraform plan -out=tfplan -no-color 2>&1 | tee plan_output.txt    
 
-      # ✅ Upload binary plan file to S3
       - name: 'Upload Binary Plan to S3'
         run: |
           aws s3 cp tfplan s3://${{ secrets.TF_LOGS_BUCKET }}/plans/${{ github.run_id }}/tfplan
 
-      # ✅ Upload human-readable plan output to S3
       - name: 'Upload Plan Output to S3'
         run: |
           aws s3 cp plan_output.txt s3://${{ secrets.TF_LOGS_BUCKET }}/plans/${{ github.run_id }}/plan_output.txt
 
-      # ✅ Write email body to a temp file, then pass via `file://` — avoids shell injection from plan output
+      # ✅ FIXED: Safe JSON payload for SES Plan Email
       - name: 'Send Plan Output Email to Manager'
         run: |
           cat > /tmp/email_body.txt << EOF
@@ -107,75 +110,114 @@ jobs:
           DevOps Pipeline
           EOF
 
-          # ✅ FIX: correct SES CLI flags — was using --to and --text which don't exist
+          # Convert the text into a clean, escaped string using jq
+          jq -Rs '.' /tmp/email_body.txt > /tmp/escaped_body.txt
+
+          # Create the JSON payload for the email
+          cat > /tmp/email_payload.json << EOF
+          {
+            "Subject": {
+              "Data": "[ACTION REQUIRED] Terraform Plan - Run #${{ github.run_id }}",
+              "Charset": "UTF-8"
+            },
+            "Body": {
+              "Text": {
+                "Data": $(cat /tmp/escaped_body.txt),
+                "Charset": "UTF-8"
+              }
+            }
+          }
+          EOF
+
+          # Send the email using the clean JSON file
           aws ses send-email \
             --from "nikhil.thengane01@gmail.com" \
             --destination "ToAddresses=${{ secrets.MANAGER_EMAIL }}" \
-            --message "Subject={Data=[ACTION REQUIRED] Terraform Plan - Run #${{ github.run_id }},Charset=UTF-8},Body={Text={Data=$(cat /tmp/email_body.txt),Charset=UTF-8}}" \
+            --message file:///tmp/email_payload.json \
             --region ${{ env.AWS_REGION }}
 
-  # ✅ JOB 2 — Apply Job
-  # Waits for manual approval via GitHub Environment protection rule
-  # Downloads and applies EXACT saved plan from S3
+
+  # ==========================================
+  # JOB 2 — Apply Job
+  # ==========================================
   terraform-apply:
     name: 'Terraform Apply'
     runs-on: ubuntu-latest
     needs: terraform-plan
     if: github.ref == 'refs/heads/main'
-
+    
     # 🔐 Manager must approve here before apply runs
     environment: production
 
     steps:
       - name: 'Checkout GitHub repository'
-        uses: actions/checkout@v4                            # ✅ FIX: was @v2
+        uses: actions/checkout@v4                            
 
       - name: 'Configure AWS credentials'
-        uses: aws-actions/configure-aws-credentials@v4      # ✅ FIX: was @v1
+        uses: aws-actions/configure-aws-credentials@v4      
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: 'Set up Terraform'
-        uses: hashicorp/setup-terraform@v3                  # ✅ FIX: was @v1
+        uses: hashicorp/setup-terraform@v3                  
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
       - name: 'Terraform Init'
         run: terraform init -no-color
 
-      # ✅ Download the EXACT same plan that was reviewed
+      # ✅ NEW: Download State to prevent local backend "amnesia"
+      - name: 'Download State from S3'
+        run: |
+          aws s3 cp s3://${{ secrets.TF_LOGS_BUCKET }}/state/terraform.tfstate terraform.tfstate || true
+
       - name: 'Download Approved Plan from S3'
         run: |
           aws s3 cp s3://${{ secrets.TF_LOGS_BUCKET }}/plans/${{ github.run_id }}/tfplan tfplan
 
-      # ✅ Apply EXACTLY the saved plan — nothing more, nothing less
       - name: 'Terraform Apply Saved Plan'
         run: |
           terraform apply -no-color tfplan 2>&1 | tee apply_output.txt
 
-      # ✅ Upload apply output to S3
       - name: 'Upload Apply Output to S3'
         run: |
           aws s3 cp apply_output.txt s3://${{ secrets.TF_LOGS_BUCKET }}/applies/${{ github.run_id }}/apply_output.txt
 
-      # ✅ Send success confirmation email
+      # ✅ NEW: Save the newly updated state to S3
+      - name: 'Upload State to S3'
+        run: |
+          aws s3 cp terraform.tfstate s3://${{ secrets.TF_LOGS_BUCKET }}/state/terraform.tfstate
+
+      # ✅ FIXED: Safe JSON payload for SES Success Email
       - name: 'Send Apply Success Email'
         if: success()
         run: |
+          cat > /tmp/success_payload.json << EOF
+          {
+            "Subject": { "Data": "✅ Terraform Apply Successful - Run #${{ github.run_id }}", "Charset": "UTF-8" },
+            "Body": { "Text": { "Data": "Hi Manager.\n\nTerraform apply completed successfully. The exact plan you approved has been applied.\n\nApproved by: ${{ github.actor }}\nRun ID: ${{ github.run_id }}\nPlan logs: s3://${{ secrets.TF_LOGS_BUCKET }}/plans/${{ github.run_id }}/plan_output.txt\nApply logs: s3://${{ secrets.TF_LOGS_BUCKET }}/applies/${{ github.run_id }}/apply_output.txt", "Charset": "UTF-8" } }
+          }
+          EOF
           aws ses send-email \
             --from "nikhil.thengane01@gmail.com" \
             --destination "ToAddresses=${{ secrets.MANAGER_EMAIL }}" \
-            --message "Subject={Data=✅ Terraform Apply Successful - Run #${{ github.run_id }},Charset=UTF-8},Body={Text={Data=Hi Manager. Terraform apply completed successfully. The exact plan you approved has been applied. Approved by: ${{ github.actor }}. Run ID: ${{ github.run_id }}. Plan logs: s3://${{ secrets.TF_LOGS_BUCKET }}/plans/${{ github.run_id }}/plan_output.txt Apply logs: s3://${{ secrets.TF_LOGS_BUCKET }}/applies/${{ github.run_id }}/apply_output.txt,Charset=UTF-8}}" \
+            --message file:///tmp/success_payload.json \
             --region ${{ env.AWS_REGION }}
 
-      # ✅ Send failure email if apply fails
+      # ✅ FIXED: Safe JSON payload for SES Failure Email
       - name: 'Send Apply Failure Email'
         if: failure()
         run: |
+          cat > /tmp/failure_payload.json << EOF
+          {
+            "Subject": { "Data": "❌ Terraform Apply FAILED - Run #${{ github.run_id }}", "Charset": "UTF-8" },
+            "Body": { "Text": { "Data": "Hi Manager.\n\nTerraform apply has FAILED. Please investigate immediately.\n\nRun ID: ${{ github.run_id }}\nApply logs: s3://${{ secrets.TF_LOGS_BUCKET }}/applies/${{ github.run_id }}/apply_output.txt", "Charset": "UTF-8" } }
+          }
+          EOF
           aws ses send-email \
             --from "nikhil.thengane01@gmail.com" \
             --destination "ToAddresses=${{ secrets.MANAGER_EMAIL }}" \
-            --message "Subject={Data=❌ Terraform Apply FAILED - Run #${{ github.run_id }},Charset=UTF-8},Body={Text={Data=Hi Manager. Terraform apply has FAILED. Please investigate immediately. Run ID: ${{ github.run_id }}. Apply logs: s3://${{ secrets.TF_LOGS_BUCKET }}/applies/${{ github.run_id }}/apply_output.txt,Charset=UTF-8}}" \
+            --message file:///tmp/failure_payload.json \
             --region ${{ env.AWS_REGION }}
