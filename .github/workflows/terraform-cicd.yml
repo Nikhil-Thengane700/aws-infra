@@ -48,7 +48,7 @@ jobs:
           mv tfsec /usr/local/bin/
 
       - name: 'Terraform Init'
-        run: tf
+        run: terraform init -no-color
 
       - name: 'Terraform Format Check'
         run: terraform fmt -check -no-color        # ✅ FIX: was `terraform fmt` (silently reformatted, never committed)
