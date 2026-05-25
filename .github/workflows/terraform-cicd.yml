@@ -66,10 +66,6 @@ jobs:
       - name: 'tfsec'
         run: tfsec . --no-color
 
-      # ✅ NEW: Download State to prevent local backend "amnesia"
-      - name: 'Download State from S3'
-        run: aws s3 cp s3://${{ secrets.TF_LOGS_BUCKET }}/state/terraform.tfstate terraform.tfstate || true
-
       - name: 'Terraform Plan'
         run: |
           terraform plan -out=tfplan -no-color 2>&1 | tee plan_output.txt    
@@ -168,11 +164,7 @@ jobs:
       - name: 'Terraform Init'
         run: terraform init -no-color
 
-      # ✅ NEW: Download State to prevent local backend "amnesia"
-      - name: 'Download State from S3'
-        run: |
-          aws s3 cp s3://${{ secrets.TF_LOGS_BUCKET }}/state/terraform.tfstate terraform.tfstate || true
-
+     
       - name: 'Download Approved Plan from S3'
         run: |
           aws s3 cp s3://${{ secrets.TF_LOGS_BUCKET }}/plans/${{ github.run_id }}/tfplan tfplan
@@ -185,11 +177,7 @@ jobs:
         run: |
           aws s3 cp apply_output.txt s3://${{ secrets.TF_LOGS_BUCKET }}/applies/${{ github.run_id }}/apply_output.txt
 
-      # ✅ NEW: Save the newly updated state to S3
-      - name: 'Upload State to S3'
-        run: |
-          aws s3 cp terraform.tfstate s3://${{ secrets.TF_LOGS_BUCKET }}/state/terraform.tfstate
-
+    
       # ✅ FIXED: Safe JSON payload for SES Success Email
       - name: 'Send Apply Success Email'
         if: success()
